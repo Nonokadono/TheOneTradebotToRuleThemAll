@@ -1,0 +1,902 @@
+================================================================================
+FILE: run_bot.py
+--------------------------------------------------------------------------------
+from runner.main_loop import TradingBot
+
+if __name__ == "__main__":
+    bot = TradingBot()
+    bot.run_forever()
+
+================================================================================
+
+================================================================================
+FILE: scrap.py
+--------------------------------------------------------------------------------
+import os
+from pathlib import Path
+
+def main():
+    src_dir = r"C:\Users\tastb\Desktop\tradebot"
+    extensions = {".py"}  # only Python files
+
+    src_path = Path(src_dir).resolve()
+    output_path = src_path / "SourceCode.txt"
+    skip_dirs = {".git", "__pycache__", "logs", "data"}  # add more if needed
+
+    with open(output_path, "w", encoding="utf-8") as out_file:
+        for file_path in src_path.rglob("*"):
+            if any(part in skip_dirs for part in file_path.parts):
+                continue
+            if (
+                file_path.is_file()
+                and file_path.suffix.lower() in extensions
+                and file_path != output_path
+            ):
+                out_file.write("=" * 80 + "\n")
+                out_file.write(f"FILE: {file_path.relative_to(src_path)}\n")
+                out_file.write("-" * 80 + "\n")
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        out_file.write(f.read())
+                except Exception as e:
+                    out_file.write(f"[ERROR reading file: {e}]\n")
+                out_file.write("\n" + "=" * 80 + "\n\n")
+
+    print(f"Source code written to: {output_path}")
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+================================================================================
+
+================================================================================
+FILE: Terminal.py
+--------------------------------------------------------------------------------
+# open_git_terminal.py 
+# git push -u origin main
+
+import os
+
+cmd = r'cmd /k "title Git Terminal & color A & cd /d C:\Users\tastb\Desktop\tradebot"'
+os.system(cmd)
+
+================================================================================
+
+================================================================================
+FILE: testibkr.py
+--------------------------------------------------------------------------------
+from ibkr_adapter.client import IBKRClient
+from risk.account_state_ibkr import fetch_account_state
+
+if __name__ == "__main__":
+    client = IBKRClient()
+    state = fetch_account_state(client)
+    print("Connected. Equity:", state.equity, "Balance:", state.balance)
+    client.disconnect()
+
+================================================================================
+
+================================================================================
+FILE: config\ibkr_settings.py
+--------------------------------------------------------------------------------
+import os
+from dataclasses import dataclass
+
+IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
+IBKR_PORT = int(os.getenv("IBKR_PORT", "4002"))  # your Gateway port
+IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "1"))
+IBKR_ACCOUNT_ID = os.getenv("IBKR_ACCOUNT_ID", "")
+
+BASE_CURRENCY = os.getenv("BASE_CURRENCY", "USD")
+LOG_LEVEL = os.getenv("TRADEBOT_LOG_LEVEL", "INFO")
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+
+
+@dataclass
+class Timeframes:
+    signal_tf: str = "15min"
+    confirm_tf: str = "1h"
+    risk_tf: str = "1d"
+
+
+TIMEFRAMES = Timeframes()
+
+
+================================================================================
+
+================================================================================
+FILE: config\instruments.py
+--------------------------------------------------------------------------------
+from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class InstrumentConfig:
+    name: str
+    max_leverage: float
+    enabled: bool = True
+
+INSTRUMENTS: List[InstrumentConfig] = [
+    InstrumentConfig("EUR_USD", max_leverage=30.0),
+    InstrumentConfig("GBP_USD", max_leverage=30.0),
+    InstrumentConfig("USD_JPY", max_leverage=30.0),
+    InstrumentConfig("XAU_USD", max_leverage=20.0),
+    InstrumentConfig("US30_USD", max_leverage=20.0),
+]
+
+================================================================================
+
+================================================================================
+FILE: config\risk_limits.py
+--------------------------------------------------------------------------------
+from dataclasses import dataclass
+
+@dataclass
+class RiskLimits:
+    max_risk_per_trade_pct: float = 0.5   # 0.5% per trade (risk at stop).[web:7][web:15]
+    max_daily_loss_pct: float = 3.0       # 3% daily prop-style hard stop.[web:7]
+    max_overall_loss_pct: float = 8.0     # 8% from high-watermark.
+    max_gross_exposure_pct: float = 90.0  # absolute notional / equity.
+    max_open_positions: int = 10
+    target_monthly_return_pct: float = 12.0
+
+RISK_LIMITS = RiskLimits()
+
+================================================================================
+
+================================================================================
+FILE: config\__init__.py
+--------------------------------------------------------------------------------
+
+================================================================================
+
+================================================================================
+FILE: execution\exposure.py
+--------------------------------------------------------------------------------
+from typing import Dict, Any
+from config.risk_limits import RISK_LIMITS
+from risk.portfolio_limits import ExposureSnapshot
+from data.storage import append_log
+
+def will_exceed_exposure(
+    snapshot: ExposureSnapshot,
+    planned_notional: float,
+    equity: float,
+) -> bool:
+    if equity <= 0:
+        return True
+    projected_gross = snapshot.gross_exposure + planned_notional
+    projected_pct = (projected_gross / equity) * 100.0
+    if projected_pct > RISK_LIMITS.max_gross_exposure_pct:
+        append_log(
+            "logs/risk_events.log",
+            f"Projected exposure {projected_pct:.2f}% > cap {RISK_LIMITS.max_gross_exposure_pct:.2f}%",
+        )
+        return True
+    return False
+
+================================================================================
+
+================================================================================
+FILE: execution\ibkr_orders.py
+--------------------------------------------------------------------------------
+from ibapi.contract import Contract
+from ibapi.order import Order
+
+from ibkr_adapter.client import IBKRClient
+from strategies.base import Signal
+from risk.sizing import PositionPlan
+from data.storage import append_log
+
+
+def build_fx_contract(instrument: str) -> Contract:
+    base, quote = instrument.split("_")
+    c = Contract()
+    c.symbol = base
+    c.secType = "CASH"
+    c.currency = quote
+    c.exchange = "IDEALPRO"
+    return c
+
+
+def build_bracket_orders(signal: Signal, plan: PositionPlan):
+    if plan.units == 0:
+        raise ValueError("Zero units in plan")
+    qty = abs(plan.units)
+    parent = Order()
+    parent.action = "BUY" if plan.side == "buy" else "SELL"
+    parent.orderType = "MKT"
+    parent.totalQuantity = qty
+    parent.tif = "DAY"
+
+    tp = Order()
+    tp.action = "SELL" if parent.action == "BUY" else "BUY"
+    tp.orderType = "LMT"
+    tp.totalQuantity = qty
+    tp.lmtPrice = float(signal.take_profit_price)
+
+    sl = Order()
+    sl.action = "SELL" if parent.action == "BUY" else "BUY"
+    sl.orderType = "STP"
+    sl.totalQuantity = qty
+    sl.auxPrice = float(signal.stop_price)
+
+    return parent, tp, sl
+
+
+def execute_signal_ibkr(
+    client: IBKRClient,
+    signal: Signal,
+    plan: PositionPlan,
+):
+    contract = build_fx_contract(signal.instrument)
+    parent, tp, sl = build_bracket_orders(signal, plan)
+    append_log(
+        "logs/orders.log",
+        f"IBKR bracket {signal.instrument} side={plan.side} units={plan.units} "
+        f"entry≈{signal.entry_price} sl={signal.stop_price} tp={signal.take_profit_price} "
+        f"risk={plan.est_risk_amount}",
+    )
+    return client.place_bracket(contract, parent, tp, sl)
+
+
+================================================================================
+
+================================================================================
+FILE: execution\__init__.py
+--------------------------------------------------------------------------------
+
+================================================================================
+
+================================================================================
+FILE: ibkr_adapter\client.py
+--------------------------------------------------------------------------------
+from dataclasses import dataclass
+from typing import Dict, Any, List, Optional
+import threading
+import time
+
+from ibapi.client import EClient
+from ibapi.wrapper import EWrapper
+from ibapi.contract import Contract
+from ibapi.order import Order
+
+from config.ibkr_settings import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, IBKR_ACCOUNT_ID
+from data.storage import append_log
+
+
+@dataclass
+class IBKRAccountSummary:
+    equity: float
+    balance: float
+    unrealized_pl: float
+    realized_pl: float
+    margin_used: float
+    margin_available: float
+
+
+class _IBKRWrapper(EWrapper, EClient):
+    def __init__(self) -> None:
+        EWrapper.__init__(self)
+        EClient.__init__(self, self)
+        self._next_order_id: Optional[int] = None
+        self._order_id_event = threading.Event()
+        self._account_summary: Dict[str, float] = {}
+        self._account_summary_event = threading.Event()
+        self._open_positions: List[Dict[str, Any]] = []
+        self._positions_event = threading.Event()
+        self._last_error: Optional[str] = None
+
+    def nextValidId(self, orderId: int) -> None:
+        self._next_order_id = orderId
+        self._order_id_event.set()
+
+    def error(self, reqId: int, errorCode: int, errorString: str) -> None:
+        msg = f"IBKR error reqId={reqId} code={errorCode} msg={errorString}"
+        append_log("logs/errors.log", msg)
+        self._last_error = msg
+
+    # account summary
+    def accountSummary(self, reqId: int, account: str, tag: str,
+                       value: str, currency: str) -> None:
+        if IBKR_ACCOUNT_ID and account != IBKR_ACCOUNT_ID:
+            return
+        try:
+            v = float(value)
+        except ValueError:
+            return
+        self._account_summary[tag] = v
+
+    def accountSummaryEnd(self, reqId: int) -> None:
+        self._account_summary_event.set()
+
+    # positions
+    def position(self, account: str, contract: Contract,
+                 position: float, avgCost: float) -> None:
+        if IBKR_ACCOUNT_ID and account != IBKR_ACCOUNT_ID:
+            return
+        self._open_positions.append(
+            {
+                "account": account,
+                "symbol": contract.symbol,
+                "secType": contract.secType,
+                "currency": contract.currency,
+                "position": position,
+                "avgCost": avgCost,
+            }
+        )
+
+    def positionEnd(self) -> None:
+        self._positions_event.set()
+
+    # helper
+    def get_next_order_id(self, timeout: float = 5.0) -> int:
+        if not self._order_id_event.wait(timeout):
+            raise RuntimeError("Timeout waiting for nextValidId")
+        if self._next_order_id is None:
+            raise RuntimeError("next_order_id None")
+        oid = self._next_order_id
+        self._next_order_id += 1
+        return oid
+
+
+class IBKRClient:
+    def __init__(self) -> None:
+        self._app = _IBKRWrapper()
+        self._thread: Optional[threading.Thread] = None
+        self._connected = False
+
+    def connect(self) -> None:
+        if self._connected:
+            return
+        self._app.connect(IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID)
+        self._thread = threading.Thread(target=self._app.run, daemon=True)
+        self._thread.start()
+        time.sleep(1.0)
+        self._connected = True
+
+    def disconnect(self) -> None:
+        if not self._connected:
+            return
+        self._app.disconnect()
+        self._connected = False
+
+    def get_account_summary(self, timeout: float = 5.0) -> IBKRAccountSummary:
+        self.connect()
+        self._app._account_summary.clear()
+        self._app._account_summary_event.clear()
+        self._app.reqAccountSummary(
+            1,
+            "All",
+            "TotalCashValue,NetLiquidation,UnrealizedPnL,RealizedPnL,MaintMarginReq,AvailableFunds",
+        )
+        if not self._app._account_summary_event.wait(timeout):
+            raise RuntimeError("Timeout waiting for account summary")
+        tags = self._app._account_summary
+        equity = float(tags.get("NetLiquidation", 0.0))
+        balance = float(tags.get("TotalCashValue", equity))
+        unrealized = float(tags.get("UnrealizedPnL", 0.0))
+        realized = float(tags.get("RealizedPnL", 0.0))
+        margin_used = float(tags.get("MaintMarginReq", 0.0))
+        margin_available = float(tags.get("AvailableFunds", 0.0))
+        return IBKRAccountSummary(
+            equity=equity,
+            balance=balance,
+            unrealized_pl=unrealized,
+            realized_pl=realized,
+            margin_used=margin_used,
+            margin_available=margin_available,
+        )
+
+    def get_open_positions(self, timeout: float = 5.0) -> Dict[str, Any]:
+        self.connect()
+        self._app._open_positions.clear()
+        self._app._positions_event.clear()
+        self._app.reqPositions()
+        if not self._app._positions_event.wait(timeout):
+            raise RuntimeError("Timeout waiting for positions")
+        return {"positions": list(self._app._open_positions)}
+
+    def place_order(self, contract: Contract, order: Order) -> Dict[str, Any]:
+        self.connect()
+        order_id = self._app.get_next_order_id()
+        append_log(
+            "logs/orders.log",
+            f"Placing order id={order_id} {contract.symbol} {order.action} {order.totalQuantity}",
+        )
+        self._app.placeOrder(order_id, contract, order)
+        return {"order_id": order_id}
+
+    def place_bracket(self, contract: Contract, parent: Order,
+                      tp: Order, sl: Order) -> Dict[str, Any]:
+        self.connect()
+        base_id = self._app.get_next_order_id()
+        parent.orderId = base_id
+        tp.orderId = base_id + 1
+        sl.orderId = base_id + 2
+        tp.parentId = parent.orderId
+        sl.parentId = parent.orderId
+        parent.transmit = False
+        tp.transmit = False
+        sl.transmit = True
+        self._app.placeOrder(parent.orderId, contract, parent)
+        self._app.placeOrder(tp.orderId, contract, tp)
+        self._app.placeOrder(sl.orderId, contract, sl)
+        return {"parent_id": parent.orderId, "tp_id": tp.orderId, "sl_id": sl.orderId}
+
+================================================================================
+
+================================================================================
+FILE: risk\account_state_ibkr.py
+--------------------------------------------------------------------------------
+from dataclasses import dataclass
+from ibkr_adapter.client import IBKRClient
+
+
+@dataclass
+class AccountState:
+    equity: float
+    balance: float
+    unrealized_pl: float
+    realized_pl: float
+    margin_used: float
+    margin_available: float
+
+
+def fetch_account_state(client: IBKRClient) -> AccountState:
+    s = client.get_account_summary()
+    return AccountState(
+        equity=s.equity,
+        balance=s.balance,
+        unrealized_pl=s.unrealized_pl,
+        realized_pl=s.realized_pl,
+        margin_used=s.margin_used,
+        margin_available=s.margin_available,
+    )
+
+================================================================================
+
+================================================================================
+FILE: risk\drawdown_monitor.py
+--------------------------------------------------------------------------------
+from dataclasses import dataclass
+from typing import Optional
+from config.risk_limits import RISK_LIMITS
+from data.storage import load_json, save_json, append_log
+
+STATE_FILE = "risk/drawdown_state.json"
+
+@dataclass
+class DrawdownState:
+    eq_high_watermark: float
+    daily_start_equity: float
+    current_day: str  # YYYY-MM-DD
+
+def load_state(current_day: str, current_equity: float) -> DrawdownState:
+    data = load_json(STATE_FILE)
+    if data is None:
+        state = DrawdownState(
+            eq_high_watermark=current_equity,
+            daily_start_equity=current_equity,
+            current_day=current_day,
+        )
+        save_state(state)
+        return state
+    state = DrawdownState(**data)
+    if state.current_day != current_day:
+        state.daily_start_equity = current_equity
+        state.current_day = current_day
+        if current_equity > state.eq_high_watermark:
+            state.eq_high_watermark = current_equity
+        save_state(state)
+    return state
+
+def save_state(state: DrawdownState) -> None:
+    save_json(STATE_FILE, state.__dict__)
+
+def can_trade(current_equity: float, state: DrawdownState) -> bool:
+    daily_drawdown_pct = 0.0 if state.daily_start_equity <= 0 else (
+        (state.daily_start_equity - current_equity) / state.daily_start_equity * 100.0
+    )
+    overall_drawdown_pct = 0.0 if state.eq_high_watermark <= 0 else (
+        (state.eq_high_watermark - current_equity) / state.eq_high_watermark * 100.0
+    )
+
+    if daily_drawdown_pct > RISK_LIMITS.max_daily_loss_pct:
+        append_log("logs/risk_events.log", f"Daily DD breached: {daily_drawdown_pct:.2f}%")
+        return False
+    if overall_drawdown_pct > RISK_LIMITS.max_overall_loss_pct:
+        append_log("logs/risk_events.log", f"Overall DD breached: {overall_drawdown_pct:.2f}%")
+        return False
+    return True
+
+================================================================================
+
+================================================================================
+FILE: risk\portfolio_limits_ibkr.py
+--------------------------------------------------------------------------------
+from dataclasses import dataclass
+from typing import Dict, Any
+from config.risk_limits import RISK_LIMITS
+from data.storage import append_log
+
+
+@dataclass
+class ExposureSnapshot:
+    gross_exposure: float
+    gross_exposure_pct: float
+    open_positions: int
+
+
+def compute_exposure(account_equity: float,
+                     open_positions_resp: Dict[str, Any]) -> ExposureSnapshot:
+    gross = 0.0
+    count = 0
+    for pos in open_positions_resp.get("positions", []):
+        qty = float(pos.get("position", 0.0))
+        avg_cost = float(pos.get("avgCost", 0.0))
+        notional = abs(qty * avg_cost)
+        gross += notional
+        if qty != 0:
+            count += 1
+    gross_pct = 0.0 if account_equity <= 0 else (gross / account_equity) * 100.0
+    return ExposureSnapshot(
+        gross_exposure=gross,
+        gross_exposure_pct=gross_pct,
+        open_positions=count,
+    )
+
+
+def check_portfolio_limits(snapshot: ExposureSnapshot) -> bool:
+    if snapshot.gross_exposure_pct > RISK_LIMITS.max_gross_exposure_pct:
+        append_log(
+            "logs/risk_events.log",
+            f"Exposure cap breached: {snapshot.gross_exposure_pct:.2f}%",
+        )
+        return False
+    if snapshot.open_positions >= RISK_LIMITS.max_open_positions:
+        append_log(
+            "logs/risk_events.log",
+            f"Max open positions breached: {snapshot.open_positions}",
+        )
+        return False
+    return True
+
+================================================================================
+
+================================================================================
+FILE: risk\sizing.py
+--------------------------------------------------------------------------------
+from dataclasses import dataclass
+from typing import Literal
+from config.risk_limits import RISK_LIMITS
+from strategies.base import Signal
+
+@dataclass
+class PositionPlan:
+    units: int
+    side: Literal["buy", "sell"]
+    notional: float
+    est_risk_amount: float
+
+def compute_position_size(
+    equity: float,
+    signal: Signal,
+    sentiment_scale: float,
+) -> PositionPlan:
+    risk_pct = RISK_LIMITS.max_risk_per_trade_pct / 100.0
+    per_trade_risk = equity * risk_pct * sentiment_scale  # up or down depending on sentiment.
+    stop_distance = abs(signal.entry_price - signal.stop_price)
+    if stop_distance <= 0:
+        return PositionPlan(units=0, side="buy", notional=0.0, est_risk_amount=0.0)
+
+    # Value per pip approximated via price, assuming 1 unit ~ 1 quote currency unit.[web:6][web:9]
+    units_float = per_trade_risk / stop_distance
+    units = int(units_float)
+    if units <= 0:
+        return PositionPlan(units=0, side="buy", notional=0.0, est_risk_amount=0.0)
+
+    side = "buy" if signal.side == "long" else "sell"
+    notional = units * signal.entry_price
+    est_risk = units * stop_distance
+    return PositionPlan(units=units, side=side, notional=notional, est_risk_amount=est_risk)
+
+================================================================================
+
+================================================================================
+FILE: risk\__init__.py
+--------------------------------------------------------------------------------
+
+================================================================================
+
+================================================================================
+FILE: runner\kill_switch.py
+--------------------------------------------------------------------------------
+from data.storage import append_log
+from risk.drawdown_monitor import can_trade, DrawdownState
+
+class KillSwitch:
+    def __init__(self) -> None:
+        self.triggered = False
+
+    def evaluate(self, equity: float, state: DrawdownState) -> bool:
+        """
+        Returns True if trading is allowed, False if kill-switch is active.
+        """
+        if self.triggered:
+            return False
+        allowed = can_trade(equity, state)
+        if not allowed:
+            self.triggered = True
+            append_log("logs/risk_events.log", "Kill switch activated; trading halted.")
+        return allowed
+
+================================================================================
+
+================================================================================
+FILE: runner\main_loop.py
+--------------------------------------------------------------------------------
+import time
+from datetime import datetime
+
+from config.instruments import INSTRUMENTS
+from config.risk_limits import RISK_LIMITS
+from strategies.mean_reversion import MeanReversionStrategy
+from strategies.momentum import MomentumStrategy
+from strategies.sentiment_module import SentimentModule
+from ibkr_adapter.client import IBKRClient
+from risk.account_state_ibkr import fetch_account_state
+from risk.drawdown_monitor import load_state, can_trade
+from risk.portfolio_limits_ibkr import compute_exposure, check_portfolio_limits
+from risk.sizing import compute_position_size
+from execution.exposure import will_exceed_exposure
+from execution.ibkr_orders import execute_signal_ibkr
+from data.storage import append_log
+
+
+class TradingBot:
+    def __init__(self) -> None:
+        self.client = IBKRClient()
+        self.strategies = [
+            MeanReversionStrategy(),
+            MomentumStrategy(),
+        ]
+        self.sentiment = SentimentModule()
+
+    def run_forever(self, sleep_seconds: int = 60) -> None:
+        while True:
+            try:
+                self.run_once()
+            except Exception as e:
+                append_log("logs/errors.log", f"run_once error {e}")
+            time.sleep(sleep_seconds)
+
+    def run_once(self) -> None:
+        account_state = fetch_account_state(self.client)
+        today = datetime.utcnow().date().isoformat()
+        dd_state = load_state(today, account_state.equity)
+        if not can_trade(account_state.equity, dd_state):
+            append_log("logs/risk_events.log", "Trade blocked by drawdown rules")
+            return
+
+        positions = self.client.get_open_positions()
+        exposure_snapshot = compute_exposure(account_state.equity, positions)
+        if not check_portfolio_limits(exposure_snapshot):
+            append_log("logs/risk_events.log", "Trade blocked by portfolio limits")
+            return
+
+        for inst_cfg in INSTRUMENTS:
+            if not inst_cfg.enabled:
+                continue
+            instrument = inst_cfg.name
+            # TODO: replace with IBKR historical data fetch
+            candles = []  # placeholder; keep structure like existing strategies expect
+            for strat in self.strategies:
+                signal = strat.generate_signal(instrument, candles)
+                if signal is None:
+                    continue
+
+                raw_sent = self.sentiment.get_score(instrument, "signal")
+                scale = self.sentiment.scale_for_risk(raw_sent)
+                plan = compute_position_size(account_state.equity, signal, scale)
+                if plan.units == 0:
+                    continue
+
+                if will_exceed_exposure(exposure_snapshot, plan.notional, account_state.equity):
+                    append_log("logs/risk_events.log", "Planned trade exceeds exposure cap")
+                    continue
+
+                execute_signal_ibkr(self.client, signal, plan)
+                return  # one trade per cycle for now
+
+
+================================================================================
+
+================================================================================
+FILE: runner\scheduler.py
+--------------------------------------------------------------------------------
+from datetime import datetime, timedelta
+
+class SimpleScheduler:
+    def __init__(self, interval_seconds: int = 60) -> None:
+        self.interval = timedelta(seconds=interval_seconds)
+        self.next_run = datetime.utcnow()
+
+    def should_run(self) -> bool:
+        now = datetime.utcnow()
+        if now >= self.next_run:
+            self.next_run = now + self.interval
+            return True
+        return False
+
+================================================================================
+
+================================================================================
+FILE: runner\__init__.py
+--------------------------------------------------------------------------------
+
+================================================================================
+
+================================================================================
+FILE: strategies\base.py
+--------------------------------------------------------------------------------
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
+
+@dataclass
+class Signal:
+    instrument: str
+    side: str  # "long" or "short"
+    entry_price: float
+    stop_price: float
+    take_profit_price: float
+    confidence: float  # 0..1
+    meta: Dict[str, Any]
+
+class BaseStrategy:
+    name: str = "base"
+
+    def generate_signal(self, instrument: str, candles) -> Optional[Signal]:
+        raise NotImplementedError
+
+================================================================================
+
+================================================================================
+FILE: strategies\mean_reversion.py
+--------------------------------------------------------------------------------
+from typing import Optional
+import statistics
+from .base import BaseStrategy, Signal
+
+class MeanReversionStrategy(BaseStrategy):
+    name = "mean_reversion"
+
+    def __init__(self, lookback: int = 20, band_mult: float = 2.0) -> None:
+        self.lookback = lookback
+        self.band_mult = band_mult
+
+    def generate_signal(self, instrument: str, candles) -> Optional[Signal]:
+        if len(candles) < self.lookback:
+            return None
+        closes = [c["close"] for c in candles[-self.lookback :]]
+        mean = statistics.mean(closes)
+        stdev = statistics.pstdev(closes)
+        upper = mean + self.band_mult * stdev
+        lower = mean - self.band_mult * stdev
+        last_close = closes[-1]
+
+        if last_close < lower:
+            stop = last_close - 1.5 * stdev
+            tp = mean
+            return Signal(
+                instrument=instrument,
+                side="long",
+                entry_price=last_close,
+                stop_price=stop,
+                take_profit_price=tp,
+                confidence=0.6,
+                meta={"mean": mean, "stdev": stdev},
+            )
+        elif last_close > upper:
+            stop = last_close + 1.5 * stdev
+            tp = mean
+            return Signal(
+                instrument=instrument,
+                side="short",
+                entry_price=last_close,
+                stop_price=stop,
+                take_profit_price=tp,
+                confidence=0.6,
+                meta={"mean": mean, "stdev": stdev},
+            )
+        return None
+
+================================================================================
+
+================================================================================
+FILE: strategies\momentum.py
+--------------------------------------------------------------------------------
+from typing import Optional
+from .base import BaseStrategy, Signal
+
+class MomentumStrategy(BaseStrategy):
+    name = "momentum"
+
+    def __init__(self, fast: int = 10, slow: int = 30) -> None:
+        self.fast = fast
+        self.slow = slow
+
+    def generate_signal(self, instrument: str, candles) -> Optional[Signal]:
+        if len(candles) < self.slow:
+            return None
+        closes = [c["close"] for c in candles]
+        fast_ma = sum(closes[-self.fast:]) / self.fast
+        slow_ma = sum(closes[-self.slow:]) / self.slow
+        last_price = closes[-1]
+
+        if fast_ma > slow_ma:
+            stop = last_price * 0.995
+            tp = last_price * 1.01
+            return Signal(
+                instrument=instrument,
+                side="long",
+                entry_price=last_price,
+                stop_price=stop,
+                take_profit_price=tp,
+                confidence=0.7,
+                meta={"fast_ma": fast_ma, "slow_ma": slow_ma},
+            )
+        elif fast_ma < slow_ma:
+            stop = last_price * 1.005
+            tp = last_price * 0.99
+            return Signal(
+                instrument=instrument,
+                side="short",
+                entry_price=last_price,
+                stop_price=stop,
+                take_profit_price=tp,
+                confidence=0.7,
+                meta={"fast_ma": fast_ma, "slow_ma": slow_ma},
+            )
+        return None
+
+================================================================================
+
+================================================================================
+FILE: strategies\sentiment_module.py
+--------------------------------------------------------------------------------
+from typing import Dict
+import random
+
+class SentimentModule:
+    """
+    Placeholder sentiment engine. In a mature bot, this would ingest
+    news, macro, and possibly LLM-based scoring to output [-1, 1]."""
+
+    def __init__(self) -> None:
+        self.default_score = 0.0
+
+    def get_score(self, instrument: str, timeframe: str) -> float:
+        # Replace with real model; here we simulate a stable but noisy score.
+        base = self.default_score
+        noise = random.uniform(-0.2, 0.2)
+        raw = max(-1.0, min(1.0, base + noise))
+        return raw
+
+    def scale_for_risk(self, raw_score: float) -> float:
+        # Map [-1, 1] to [0.3, 1.3] with clipping.
+        return max(0.3, min(1.3, 1.0 + 0.5 * raw_score))
+
+================================================================================
+
+================================================================================
+FILE: strategies\__init__.py
+--------------------------------------------------------------------------------
+
+================================================================================
+

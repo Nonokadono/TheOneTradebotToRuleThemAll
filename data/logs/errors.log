@@ -1,0 +1,19 @@
+2026-02-04T22:50:55.701103Z V20Error 400 {"errorMessage":"Invalid value specified for 'accountID'"} for v3/accounts//summary
+2026-02-04T22:50:55.701851Z Cycle error: {"errorMessage":"Invalid value specified for 'accountID'"}
+2026-02-04T22:52:09.597875Z V20Error 400 {"errorMessage":"Invalid value specified for 'accountID'"} for v3/accounts//summary
+2026-02-04T22:52:09.598478Z Cycle error: {"errorMessage":"Invalid value specified for 'accountID'"}
+2026-02-04T22:53:09.295963Z V20Error 400 {"errorMessage":"Invalid value specified for 'accountID'"} for v3/accounts//summary
+2026-02-04T22:53:09.296591Z Cycle error: {"errorMessage":"Invalid value specified for 'accountID'"}
+2026-02-04T22:54:09.293554Z V20Error 400 {"errorMessage":"Invalid value specified for 'accountID'"} for v3/accounts//summary
+2026-02-04T22:54:09.294840Z Cycle error: {"errorMessage":"Invalid value specified for 'accountID'"}
+2026-02-04T22:55:09.291205Z V20Error 400 {"errorMessage":"Invalid value specified for 'accountID'"} for v3/accounts//summary
+2026-02-04T22:55:09.291908Z Cycle error: {"errorMessage":"Invalid value specified for 'accountID'"}
+2026-02-05T00:28:37.287085Z IBKR error reqId=-1 code=2104 msg=Market data farm connection is OK:usfarm
+2026-02-05T00:28:37.288617Z IBKR error reqId=-1 code=2107 msg=HMDS data farm connection is inactive but should be available upon demand.ushmds
+2026-02-05T00:28:37.289332Z IBKR error reqId=-1 code=2158 msg=Sec-def data farm connection is OK:secdefnj
+2026-02-05T00:32:00.775362Z IBKR error reqId=-1 code=2104 msg=Market data farm connection is OK:usfarm
+2026-02-05T00:32:00.775995Z IBKR error reqId=-1 code=2107 msg=HMDS data farm connection is inactive but should be available upon demand.ushmds
+2026-02-05T00:32:00.776596Z IBKR error reqId=-1 code=2158 msg=Sec-def data farm connection is OK:secdefnj
+2026-02-05T00:33:48.212787Z IBKR error reqId=-1 code=2104 msg=Market data farm connection is OK:usfarm
+2026-02-05T00:33:48.213433Z IBKR error reqId=-1 code=2107 msg=HMDS data farm connection is inactive but should be available upon demand.ushmds
+2026-02-05T00:33:48.214014Z IBKR error reqId=-1 code=2158 msg=Sec-def data farm connection is OK:secdefnj
